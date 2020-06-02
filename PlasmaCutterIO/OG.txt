@@ -1,0 +1,264 @@
+bool statusLedState = false;
+bool debugging = true;
+int pilotArcVoltage = 0;
+int mainArcVoltage = 0;
+bool acOKActive = false;
+bool overTempActive = false;
+bool gasOKActive = false;
+bool dcOKActive = false;
+
+bool torchOutput = false;
+bool torchFire = true;
+
+bool alarmStatus = false;
+bool arcFailedAlarm = false;
+
+int torchOutputPin = 8;
+int dcOKInputPin = 4;
+int gasOKInputPin = 5;
+int overTempInputPin = 6;
+int acOkInputPin = 7;
+
+int arcStartRetryLimit = 5; 
+int arcStartTimeout = 1500;
+int arcStartinterlockTimeout = 3000;
+
+unsigned long arcStartTime = 0;
+unsigned long arcStartinterlockStartTime = 0;
+
+bool arcStarted = false;
+bool arcStarting = false;
+bool arcStartinterlock = false;
+
+int arcStartTries = 0;
+int loopCount = 0;
+
+void setup() {
+	Serial.begin(115200);
+	pinMode(LED_BUILTIN, OUTPUT);
+	pinMode(torchOutputPin, OUTPUT);
+	pinMode(dcOKInputPin, INPUT_PULLUP);
+	pinMode(gasOKInputPin, INPUT_PULLUP);
+	pinMode(overTempInputPin, INPUT_PULLUP);
+	pinMode(acOkInputPin, INPUT_PULLUP);
+}
+
+void loop() {
+
+
+	if ((loopCount % 25) == 0) {
+		loop25ms();
+	}
+
+	if ((loopCount % 100) == 0) {
+		pilotArcVoltage = analogRead(A0);
+		mainArcVoltage = analogRead(A1);
+
+		if (arcFailedAlarm) {
+			if (statusLedState) {
+				statusLedState = false;
+				digitalWrite(LED_BUILTIN, LOW);
+			}
+			else {
+				statusLedState = true;
+				digitalWrite(LED_BUILTIN, HIGH);
+			}
+		}
+		loop250ms();
+	}
+
+	if ((loopCount % 250) == 0) {
+		if (alarmStatus && !arcFailedAlarm) {
+			if (statusLedState) {
+				statusLedState = false;
+				digitalWrite(LED_BUILTIN, LOW);
+			}
+			else {
+				statusLedState = true;
+				digitalWrite(LED_BUILTIN, HIGH);
+			}
+		}
+		loop250ms();
+	}
+
+	if ((loopCount % 1000) == 0) {
+		loop1000ms();
+	}
+
+	//Serial.println(loopCount);
+	loopCount += 25;
+	delay(25);
+	if (loopCount == 1000) {
+		loopCount = 0;
+	}
+}
+
+void loop25ms() {
+	readInputs();
+
+	// check for alarms
+	if (!gasOKActive || overTempActive || !acOKActive) {
+		alarmStatus = true;
+	}
+	else {
+		alarmStatus = false;
+	}
+
+	if (!alarmStatus && !arcFailedAlarm) {
+
+		// Shutdown if DC ok is lost
+		if (torchOutput && !dcOKActive && !arcStarting) {
+			torchOutput = false;
+		}
+
+		// Shutdown if Over Temp
+		if (overTempActive) {
+			torchOutput = false;
+			arcStarting = false;
+			arcStartinterlock = true;
+			arcStarted = false;
+		}
+
+		// Try to fire torch, start timer
+		if (!torchOutput && torchFire && !alarmStatus && !arcStartinterlock && !dcOKActive && !arcFailedAlarm) {
+			torchOutput = true;
+			arcStarting = true;
+			arcStartTime = millis();
+		}
+
+		if (arcStartTries >= arcStartRetryLimit) {
+			arcFailedAlarm = true;
+		}
+
+		// check if arc is starting and DC ok is active
+		if (arcStarting) {
+			if (dcOKActive) {
+				arcStartTries = 0;
+				arcStarted = true;
+				arcStarting = false;
+				arcStartinterlock = false;
+			}
+			else
+			{
+				unsigned long nowTime = millis();
+				if ((nowTime - arcStartTime) >= arcStartTimeout) {
+					torchOutput = false;
+					arcStartinterlock = true;
+					arcStartinterlockStartTime = millis();
+					arcStarting = false;
+					arcStarted = false;
+					alarmStatus = true;
+					arcStartTries++;
+				}
+			}
+		}
+
+		// check if interlock timeout is achived
+		if (arcStartinterlock && !arcStarted) {
+			unsigned long nowTime = millis();
+			if ((nowTime - arcStartinterlockStartTime) >= arcStartinterlockTimeout) {
+				arcStartinterlock = false;
+				torchOutput = torchFire;
+				arcStarting = true;
+				arcStartTime = millis();
+				alarmStatus = false;
+			}
+		}
+	}
+	else {
+		torchOutput = false;
+	}
+	torchControl();
+}
+
+void loop250ms() {
+	//Serial.println("Loop");
+
+}
+
+void loop1000ms() {
+	statusReport();
+}
+
+void torchControl() {
+
+	if (!alarmStatus && torchOutput && !arcStartinterlock) {
+		torchOutput = true;
+		digitalWrite(torchOutputPin, HIGH);
+	}
+	else {
+		torchOutput = false;
+		digitalWrite(torchOutputPin, LOW);
+	}
+}
+
+void readInputs() {
+
+	if (digitalRead(acOkInputPin) == LOW) {
+		if (!acOKActive) {
+			arcStartTries = 0;
+		}
+		acOKActive = true;
+	}
+	else {
+		acOKActive = false;
+	}
+
+	if (digitalRead(overTempInputPin) == LOW) {
+		if (!overTempActive) {
+			arcStartTries = 0;
+		}
+		overTempActive = true;
+	}
+	else {
+		overTempActive = false;
+	}
+
+	if (digitalRead(gasOKInputPin) == LOW) {
+		if (!gasOKActive) {
+			arcStartTries = 0;
+		}
+		gasOKActive = true;
+	}
+	else {
+		gasOKActive = false;
+	}
+
+	if (digitalRead(dcOKInputPin) == LOW) {
+		dcOKActive = true;
+	}
+	else {
+		dcOKActive = false;
+	}
+}
+
+void statusReport() {
+	if (debugging) {
+
+		Serial.write(27);       // ESC command
+		Serial.print("[2J");    // clear screen command
+		Serial.write(27);
+		Serial.print("[H");     // cursor to home command
+		Serial.print("Alarm Status                              "); Serial.println(alarmStatus);
+		Serial.print("Arc Faild Alarm                           "); Serial.println(arcFailedAlarm);
+		Serial.print("Torch Fire Command                        "); Serial.println(torchFire);
+		Serial.print("AC OK                                     "); Serial.println(acOKActive);
+		Serial.print("Over Temp                                 "); Serial.println(overTempActive);
+		Serial.print("Gas OK                                    "); Serial.println(gasOKActive);
+		Serial.print("DC OK                                     "); Serial.println(dcOKActive);
+		Serial.print("Pilot Arc Voltage                         "); Serial.println(pilotArcVoltage);
+		Serial.print("Main Arc Voltage                          "); Serial.println(mainArcVoltage);
+		Serial.print("Torch Output                              "); Serial.println(torchOutput);
+		Serial.print("Arc Start Retry Limit                     "); Serial.println(arcStartRetryLimit);
+		Serial.print("Arc Start Timeout                         "); Serial.println(arcStartTimeout);
+		Serial.print("Arc Start interlock Timeout               "); Serial.println(arcStartinterlockTimeout);
+		Serial.print("Arc Start Time                            "); Serial.println(arcStartTime);
+		Serial.print("Arc Start interlock Start Time            "); Serial.println(arcStartinterlockStartTime);
+		Serial.print("Arc Started tries                         "); Serial.println(arcStartTries);
+		Serial.print("Arc Started                               "); Serial.println(arcStarted);
+		Serial.print("Arc Starting                              "); Serial.println(arcStarting);
+		Serial.print("Arc Start interlock                       "); Serial.println(arcStartinterlock);
+		Serial.print("LoopCount                                 "); Serial.println(loopCount);
+		Serial.print("Millis                                    "); Serial.println(millis());
+	}
+}
